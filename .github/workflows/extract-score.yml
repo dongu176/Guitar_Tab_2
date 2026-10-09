@@ -1,0 +1,163 @@
+name: TAB Score Extraction
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "extract = video -> score.json -> SVG/PDF   |   render = existing score.json -> SVG/PDF"
+        type: choice
+        options: [extract, render]
+        default: extract
+      video_url:
+        description: "YouTube URL (optional)"
+        required: false
+        default: ""
+      video_path:
+        description: "Video file path inside the repo, e.g. input/video.mp4 (optional; wins over video_url)"
+        required: false
+        default: ""
+      recognize:
+        description: "Run Gemini recognition (1 = yes, 0 = no; 0 needs no API key)"
+        type: choice
+        options: ["1", "0"]
+        default: "1"
+      expected_measures:
+        description: "Optional expected measure count. Leave blank to disable count validation."
+        required: false
+        default: ""
+      sample_sec:
+        description: "Base sampling interval in seconds"
+        required: false
+        default: "0.15"
+      segment_sec:
+        description: "Window length (s) for per-window TAB box detection"
+        required: false
+        default: "60"
+      label_corr_min:
+        description: "Page-flip sensitivity (label-band correlation threshold)"
+        required: false
+        default: "0.9"
+      measures_per_line:
+        description: "Max measures per line in SVG/PDF (0 = auto)"
+        required: false
+        default: "0"
+      score_json:
+        description: "render mode only: path of score.json inside the repo"
+        required: false
+        default: "output/score.json"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+      PYTHONUNBUFFERED: "1"
+      OUT_DIR: output
+      RECOGNIZE: ${{ inputs.recognize }}
+      EXPECTED_MEASURES: ${{ inputs.expected_measures }}
+      SAMPLE_SEC: ${{ inputs.sample_sec }}
+      SEGMENT_SEC: ${{ inputs.segment_sec }}
+      LABEL_CORR_MIN: ${{ inputs.label_corr_min }}
+      MEASURES_PER_LINE: ${{ inputs.measures_per_line }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install system packages (ffmpeg, fonts)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-nanum fonts-noto-cjk fonts-dejavu-core
+          fc-cache -f
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade yt-dlp
+
+      - name: Resolve input
+        if: ${{ inputs.mode == 'extract' }}
+        shell: bash
+        env:
+          IN_URL: ${{ inputs.video_url }}
+          IN_PATH: ${{ inputs.video_path }}
+        run: |
+          if [ -z "$IN_URL" ] && [ -z "$IN_PATH" ]; then
+            echo "::error::Provide video_url or video_path (both are empty)."
+            exit 1
+          fi
+          if [ -n "$IN_PATH" ]; then
+            if [ -n "$IN_URL" ]; then
+              echo "::warning::Both video_url and video_path were given; video_path takes precedence."
+            fi
+            if [ ! -f "$IN_PATH" ]; then
+              echo "::error::video_path '$IN_PATH' does not exist in the repository checkout."
+              exit 1
+            fi
+            echo "TAB_INPUT=$IN_PATH" >> "$GITHUB_ENV"
+          else
+            echo "::add-mask::$IN_URL"
+            echo "TAB_INPUT=$IN_URL" >> "$GITHUB_ENV"
+          fi
+
+      - name: Write YouTube cookies (optional)
+        if: ${{ inputs.mode == 'extract' }}
+        shell: bash
+        run: |
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            printf '%s\n' "$YOUTUBE_COOKIES" > cookies.txt
+            echo "cookies.txt written from secret YOUTUBE_COOKIES"
+          fi
+
+      - name: Extract (video -> raw_recognition.json -> score.json -> SVG/PDF)
+        if: ${{ inputs.mode == 'extract' }}
+        shell: bash
+        run: |
+          mkdir -p output
+          python extract.py "$TAB_INPUT" 2>&1 | tee output/run.log
+
+      - name: Re-render existing score.json
+        if: ${{ inputs.mode == 'render' }}
+        shell: bash
+        env:
+          SCORE_JSON: ${{ inputs.score_json }}
+        run: |
+          mkdir -p output
+          python render_score.py "$SCORE_JSON" --out-dir output --per-line "${MEASURES_PER_LINE:-0}" 2>&1 | tee output/run.log
+
+      - name: Check outputs (files + jsonschema validation)
+        shell: bash
+        run: |
+          if [ "${{ inputs.mode }}" = "render" ]; then
+            python ci_check.py output --render-only
+          else
+            python ci_check.py output
+          fi
+
+      - name: Mark failure in summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## TAB Extraction FAILED"
+            echo
+            echo "See the step logs. Partial results (debug images, raw_recognition.json, run.log) are in the artifact if they were produced."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload output artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tab-score-output
+          path: output/
+          if-no-files-found: warn
+          retention-days: 14
