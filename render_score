@@ -1,0 +1,50 @@
+"""score.json 만으로 검증 + SVG + PDF 를 다시 만든다. (영상/AI/네트워크 불필요)
+
+사용법:
+    python render_score.py output/score.json
+    python render_score.py output/score.json --per-line 4 --out-dir output
+"""
+import argparse
+import json
+import os
+import sys
+
+import scorelib as sl
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("score_json")
+    ap.add_argument("--out-dir", default=None, help="기본값: score.json 이 있는 폴더")
+    ap.add_argument("--per-line", type=int, default=0, help="한 줄 최대 마디 수 (0=자동)")
+    args = ap.parse_args()
+
+    with open(args.score_json, "r", encoding="utf-8") as f:
+        score = json.load(f)
+    out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.score_json))
+    rep = sl.render_all(score, out_dir, args.per_line)
+
+    st = rep.get("stats", {})
+    print(f"마디 {st.get('measures', 0)}개, 이벤트 {st.get('events', 0)}개")
+    for e in rep["errors"]:
+        print("❌", e)
+    for w in rep["warnings"]:
+        print("⚠️", w)
+    for e in rep["schema_errors"][:10]:
+        print("❌ schema:", e)
+    print(f"→ {out_dir}/score.svg, score.pdf, score_validation.json")
+    meta = score.get("metadata") or {}
+    exp = meta.get("expected_measures")
+    n = st.get("measures", 0)
+    sl.write_step_summary("TAB Re-render Result", [
+        ("Input", args.score_json), ("Expected measures", exp if exp else "not provided"),
+        ("Final measures", n), ("Missing measures", max(0, exp - n) if exp else "not checked"),
+        ("Validation", "PASS" if rep.get("ok") and rep.get("schema_valid") else
+         ("SKIPPED (jsonschema not installed)" if rep.get("schema_valid") is None and not rep["errors"] else "FAIL")),
+        ("SVG", "PASS" if os.path.exists(os.path.join(out_dir, "score.svg")) else "FAIL"),
+        ("PDF", "PASS" if os.path.exists(os.path.join(out_dir, "score.pdf")) else "FAIL")])
+    return 0 if rep.get("ok", True) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
