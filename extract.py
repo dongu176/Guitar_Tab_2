@@ -151,6 +151,16 @@ def is_url(src):
     return src.lower().startswith(("http://", "https://"))
 
 
+def _yt_opts(use_cookies):
+    opts = {
+        "format": f"bv*[height<={VIDEO_HEIGHT}][vcodec^=avc1]/bv*[height<={VIDEO_HEIGHT}]/b[height<={VIDEO_HEIGHT}]/b",
+        "outtmpl": "video.%(ext)s", "noplaylist": True, "quiet": True, "no_warnings": True, "retries": 5,
+    }
+    if use_cookies:
+        opts["cookiefile"] = "cookies.txt"
+    return opts
+
+
 def download_video(src):
     if os.path.exists(src):
         return src, os.path.splitext(os.path.basename(src))[0]
@@ -158,16 +168,34 @@ def download_video(src):
         raise RuntimeError(f"입력 파일을 찾을 수 없습니다: {src}")
     if yt_dlp is None:
         raise RuntimeError("yt-dlp 가 설치되어 있지 않습니다. (pip install yt-dlp)")
+    try:
+        print(f"yt-dlp version: {yt_dlp.version.__version__}")
+    except Exception:
+        pass
     for f in glob.glob("video.*"):
         os.remove(f)
-    opts = {
-        "format": f"bv*[height<={VIDEO_HEIGHT}][vcodec^=avc1]/bv*[height<={VIDEO_HEIGHT}]/b[height<={VIDEO_HEIGHT}]/b",
-        "outtmpl": "video.%(ext)s", "noplaylist": True, "quiet": True, "no_warnings": True, "retries": 5,
-    }
-    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        opts["cookiefile"] = "cookies.txt"
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(src, download=True)
+    has_cookies = os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0
+    # 쿠키가 있으면 먼저 쓰고, 실패하면 쿠키 없이 다시 시도한다(쿠키가 오히려 오류를 내는 경우가 있음)
+    attempts = ([True] if has_cookies else []) + [False]
+    errors, info = [], None
+    for use_cookies in attempts:
+        try:
+            with yt_dlp.YoutubeDL(_yt_opts(use_cookies)) as ydl:
+                info = ydl.extract_info(src, download=True)
+            if use_cookies is False and has_cookies:
+                print("ℹ️ 쿠키로는 실패해서 쿠키 없이 다운로드했습니다. (YOUTUBE_COOKIES 가 만료/무효일 수 있음)")
+            break
+        except Exception as e:
+            msg = str(e).replace(src, "<input>")
+            errors.append(f"{'with cookies' if use_cookies else 'without cookies'}: {msg[:300]}")
+            print(f"⚠️ 다운로드 시도 실패 ({'쿠키 사용' if use_cookies else '쿠키 없음'}): {msg[:200]}")
+            for f in glob.glob("video.*"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+    if info is None:
+        raise RuntimeError(" | ".join(errors))
     files = [f for f in glob.glob("video.*") if not f.endswith((".part", ".ytdl"))]
     if not files:
         raise RuntimeError("영상 다운로드에 실패했습니다.")
@@ -1078,7 +1106,14 @@ def process(src):
     except Exception as e:
         msg = str(e).replace(src, "<input>") if is_url(src) else str(e)
         print(f"ERROR: 영상 준비 실패: {msg[:600]}")
-        print("  (YouTube 가 GitHub runner IP 를 차단했다면 README 의 cookies 설정을 참고하세요.)")
+        low = msg.lower()
+        if "needs to be reloaded" in low:
+            print("  힌트: yt-dlp 가 오래되었거나 쿠키가 무효일 수 있습니다. YOUTUBE_COOKIES secret 을 지우거나 새 쿠키로 바꾸고,")
+            print("        그래도 안 되면 영상을 repo 의 input/ 에 올려 video_path 로 실행하세요.")
+        elif "sign in" in low or "bot" in low:
+            print("  힌트: YouTube 가 GitHub runner IP 를 봇으로 차단했습니다. README 의 cookies 설정 또는 video_path 를 사용하세요.")
+        else:
+            print("  힌트: 영상이 비공개/삭제/지역 제한인지 확인하고, 안 되면 video_path 로 직접 올린 영상을 사용하세요.")
         sys.exit(1)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps <= 0 or np.isnan(fps):
