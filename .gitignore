@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+output/
+video.*
+video_h264.mp4
+cookies.txt
+input/*
+!input/.gitkeep
